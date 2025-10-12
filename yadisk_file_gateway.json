@@ -1,0 +1,63 @@
+{
+  "name": "yadisk_file_gateway",
+  "description": "Загрузка, скачивание (в т.ч. по публичной ссылке), переименование, удаление и листинг файлов на Яндекс.Диске. Прогресс-бар, умный чанк и возобновление скачивания.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "action": {
+        "type": "string",
+        "enum": ["upload", "download", "rename", "delete", "list"],
+        "description": "Тип действия"
+      },
+      "oauth_token": {
+        "type": "string",
+        "description": "OAuth-токен для операций (обязателен для upload/rename/delete/list и для download приватных файлов)"
+      },
+      "disk_path": {
+        "type": "string",
+        "description": "Путь на Диске (например, 'disk:/docs/file.txt' или 'disk:/folder' для list)"
+      },
+      "new_name": {
+        "type": "string",
+        "description": "Новое имя файла (для действия rename)"
+      },
+      "local_path": {
+        "type": "string",
+        "description": "Локальный путь: источник для upload, приёмник для download"
+      },
+      "public_key": {
+        "type": "string",
+        "description": "Публичная ссылка/ключ для скачивания без OAuth"
+      },
+      "public_path": {
+        "type": "string",
+        "description": "Внутренний путь в опубликованной папке (опционально, для download через public_key)"
+      },
+      "overwrite": {
+        "type": "boolean",
+        "description": "Перезаписывать при upload (по умолчанию true)"
+      },
+      "show_progress": {
+        "type": "boolean",
+        "description": "Показывать прогресс-бар (по умолчанию true)"
+      },
+      "chunk_size": {
+        "type": "integer",
+        "description": "Размер чанка в байтах; если не указан — выбирается автоматически"
+      },
+      "resume": {
+        "type": "boolean",
+        "description": "Возобновлять скачивание (по умолчанию false)"
+      },
+      "limit": {
+        "type": "integer",
+        "description": "Количество элементов для list (по умолчанию 100)"
+      },
+      "offset": {
+        "type": "integer",
+        "description": "Смещение (пагинация) для list (по умолчанию 0)"
+      }
+    },
+    "required": ["action"]
+  }
+}
