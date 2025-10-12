@@ -32,3 +32,18 @@
 
 ```bash
 !pip install requests
+```
+
+# Важные замечания для Colab
+Рабочая директория — /content (Linux-пути), не C:\
+
+Файлы в /content исчезают после рестарта рантайма — для долговременного хранения используйте Google Drive
+
+Для download указывайте полный путь с именем файла, а не только каталог
+
+## Подготовка файлов в Colab
+Загрузка файлов с ПК
+```python
+from google.colab import files
+uploaded = files.upload()               # выбрать файл
+local_src = list(uploaded.keys())[0]    # имя появится в /content/
