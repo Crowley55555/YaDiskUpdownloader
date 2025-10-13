@@ -4,8 +4,9 @@ from yadisk_file_gateway import yadisk_file_gateway
 args = {
     "action": "upload",
     "oauth_token": "y0__xDIuu2XBxiR7TogncG82BTbb9rgDpTKFA68a9jdILc5cHhkcg",
-    "disk_path": "disk:/img1.png",
-    "file_url": "https://drive.google.com/file/d/1VDw4A0vc0eovRMscfWmA_nP9n35Tn5BC/view?usp=sharing",  # ссылка на файл в интернете
+    "disk_path": "disk:/333.mp3",
+    # "local_path": "D:/143214321.mp3",  # локальный путь
+    "file_url": "https://disk.yandex.ru/d/meIOCovSsHIPXg",  # ссылка на файл в интернете
     "overwrite": True,          # перезаписать, если уже есть
     "show_progress": True       # показать прогресс-бар
 }
