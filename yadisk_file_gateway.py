@@ -1,8 +1,8 @@
 def yadisk_file_gateway(arguments):
     """
-    Яндекс.Диск helper:
-      upload   — загрузка (OAuth, прогресс-бар, умный чанк)
-      download — скачивание (OAuth+disk_path ИЛИ public_key; прогресс-бар, умный чанк, resume)
+    Яндекс.Диск helper (только ссылки):
+      upload   — загрузка файла по URL на Яндекс.Диск (возвращает ссылку на загруженный файл)
+      download — получение ссылки для скачивания (OAuth+disk_path ИЛИ public_key)
       rename   — переименование (через move)
       delete   — удаление
       list     — список элементов в папке
@@ -11,8 +11,11 @@ def yadisk_file_gateway(arguments):
     import json
     import pathlib
     import sys
+    import hashlib
     from typing import Optional, Dict, Any, Iterable
     import requests
+    import urllib.request
+    import urllib.parse
 
     BASE = "https://cloud-api.yandex.net/v1/disk"
 
@@ -65,36 +68,102 @@ def yadisk_file_gateway(arguments):
             sys.stdout.write(f"\r{prefix} {done_bytes} bytes...")
             sys.stdout.flush()
 
-    # file-like с прогрессом для upload (надёжнее, чем генератор + ручной Content-Length)
-    class ProgressFile:
-        def __init__(self, path, show):
-            self._f = open(path, "rb")
-            self._size = os.path.getsize(path)
-            self._read = 0
+    # file-like с прогрессом для upload из URL
+    class ProgressURLFile:
+        def __init__(self, url, show):
+            self._url = url
             self._show = show
             self._last_percent = None
+            self._read = 0
+            self._size = 0
+            self._response = None
+            self._closed = False
+            
+            # Получаем размер файла
+            try:
+                head_resp = requests.head(url, timeout=30, allow_redirects=True)
+                content_length = head_resp.headers.get('Content-Length')
+                if content_length:
+                    self._size = int(content_length)
+            except Exception:
+                self._size = 0
+                
         def __len__(self):
             return self._size
-        def read(self, amt=1024 * 1024):
-            chunk = self._f.read(amt)
-            if chunk:
-                self._read += len(chunk)
-                if self._show and self._size > 0:
-                    percent = int(self._read * 100 / self._size)
-                    if percent != self._last_percent:
-                        self._last_percent = percent
-                        bar_len = 30
-                        filled = int(percent * bar_len / 100)
-                        bar = "#" * filled + "-" * (bar_len - filled)
-                        sys.stdout.write(f"\rUploading [{bar}] {percent:3d}%")
-                        sys.stdout.flush()
-            else:
-                if self._show and self._size > 0:
-                    sys.stdout.write("\n")
-            return chunk
-        def close(self):
+            
+        def read(self, amt=-1):
+            if self._closed:
+                return b""
+                
+            # Если еще не начали загрузку, начинаем
+            if self._response is None:
+                try:
+                    self._response = requests.get(self._url, stream=True, timeout=600, allow_redirects=True)
+                    self._response.raise_for_status()
+                except Exception as e:
+                    if self._show:
+                        sys.stdout.write(f"\nОшибка при загрузке файла: {e}\n")
+                    return b""
+            
+            # Читаем данные
             try:
-                self._f.close()
+                if amt == -1:
+                    # Читаем все оставшиеся данные
+                    data = b""
+                    for chunk in self._response.iter_content(chunk_size=8192):
+                        if chunk:
+                            data += chunk
+                            self._read += len(chunk)
+                            self._update_progress()
+                    if self._show and self._size > 0:
+                        sys.stdout.write("\n")
+                    return data
+                else:
+                    # Читаем указанное количество байт
+                    data = b""
+                    remaining = amt
+                    for chunk in self._response.iter_content(chunk_size=min(8192, remaining)):
+                        if not chunk:
+                            break
+                        chunk_len = len(chunk)
+                        if chunk_len <= remaining:
+                            data += chunk
+                            remaining -= chunk_len
+                            self._read += chunk_len
+                            self._update_progress()
+                        else:
+                            # Чанк больше чем нужно
+                            data += chunk[:remaining]
+                            self._read += remaining
+                            self._update_progress()
+                            break
+                    return data
+                    
+            except Exception as e:
+                if self._show:
+                    sys.stdout.write(f"\nОшибка чтения: {e}\n")
+                return b""
+                
+        def _update_progress(self):
+            if self._show and self._size > 0:
+                percent = int(self._read * 100 / self._size)
+                if percent != self._last_percent:
+                    self._last_percent = percent
+                    bar_len = 30
+                    filled = int(percent * bar_len / 100)
+                    bar = "#" * filled + "-" * (bar_len - filled)
+                    sys.stdout.write(f"\rUploading from URL [{bar}] {percent:3d}%")
+                    sys.stdout.flush()
+            elif self._show and self._size == 0:
+                # Если размер неизвестен, показываем количество байт
+                sys.stdout.write(f"\rUploading from URL {self._read} bytes...")
+                sys.stdout.flush()
+                
+        def close(self):
+            self._closed = True
+            try:
+                if self._response:
+                    self._response.close()
             except Exception:
                 pass
 
@@ -103,14 +172,13 @@ def yadisk_file_gateway(arguments):
     token = (arguments.get("oauth_token") or "").strip()
     disk_path = _norm_disk_path(arguments.get("disk_path", ""))
     new_name = arguments.get("new_name")
-    local_path = arguments.get("local_path")
+    file_url = arguments.get("file_url")  # URL файла для загрузки
     overwrite = bool(arguments.get("overwrite", True))
     show_progress = bool(arguments.get("show_progress", True))
     chunk_override = arguments.get("chunk_size")
     chunk_override = int(chunk_override) if isinstance(chunk_override, int) and chunk_override > 0 else None
     public_key = arguments.get("public_key")
     public_path = arguments.get("public_path")
-    resume = bool(arguments.get("resume", False))
     limit = int(arguments.get("limit", 100))
     offset = int(arguments.get("offset", 0))
 
@@ -124,8 +192,8 @@ def yadisk_file_gateway(arguments):
                 return {"ok": False, "message": "Для upload требуется oauth_token"}
             if not disk_path:
                 return {"ok": False, "message": "Для upload требуется disk_path"}
-            if not local_path or not os.path.isfile(local_path):
-                return {"ok": False, "message": f"Файл не найден: {local_path}"}
+            if not file_url:
+                return {"ok": False, "message": "Для upload требуется file_url (ссылка на файл)"}
 
             headers = _auth_headers(token)
             params = {"path": disk_path, "overwrite": "true" if overwrite else "false"}
@@ -136,27 +204,90 @@ def yadisk_file_gateway(arguments):
             if not href:
                 return {"ok": False, "message": "Не получена ссылка для загрузки"}
 
-            pf = ProgressFile(local_path, show_progress)
+            # Простая загрузка с urllib (самый надежный способ)
             try:
+                if show_progress:
+                    sys.stdout.write("Загрузка файла из URL...\n")
+                    sys.stdout.flush()
+                
+                # Создаем запрос с правильными заголовками
+                req = urllib.request.Request(
+                    file_url,
+                    headers={
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                    }
+                )
+                
+                # Загружаем файл
+                with urllib.request.urlopen(req, timeout=600) as response:
+                    file_data = response.read()
+                    file_size = len(file_data)
+                    
+                    if show_progress:
+                        sys.stdout.write(f"Загружено {file_size} байт\n")
+                        sys.stdout.flush()
+                
+                if not file_data:
+                    return {"ok": False, "message": "Файл пустой или не удалось загрузить"}
+                
+                # Загружаем на Яндекс.Диск
+                if show_progress:
+                    sys.stdout.write("Загрузка на Яндекс.Диск...\n")
+                    sys.stdout.flush()
+                
+                # Определяем Content-Type по расширению файла
+                content_type = "application/octet-stream"
+                if disk_path:
+                    ext = disk_path.lower().split('.')[-1] if '.' in disk_path else ''
+                    if ext in ['jpg', 'jpeg']:
+                        content_type = "image/jpeg"
+                    elif ext == 'png':
+                        content_type = "image/png"
+                    elif ext == 'gif':
+                        content_type = "image/gif"
+                    elif ext == 'mp3':
+                        content_type = "audio/mpeg"
+                    elif ext == 'mp4':
+                        content_type = "video/mp4"
+                    elif ext == 'pdf':
+                        content_type = "application/pdf"
+                    elif ext == 'txt':
+                        content_type = "text/plain"
+                
                 put = requests.put(
                     href,
-                    data=pf,
-                    headers={"Content-Type": "application/octet-stream"},
+                    data=file_data,
+                    headers={
+                        "Content-Type": content_type,
+                        "Content-Length": str(len(file_data))
+                    },
                     timeout=600
                 )
-            finally:
-                pf.close()
+                
+            except urllib.error.URLError as e:
+                return {"ok": False, "message": f"Ошибка URL при загрузке: {e}"}
+            except requests.exceptions.ConnectionError as e:
+                return {"ok": False, "message": f"Ошибка соединения при загрузке: {e}"}
+            except requests.exceptions.Timeout as e:
+                return {"ok": False, "message": f"Таймаут при загрузке: {e}"}
+            except Exception as e:
+                return {"ok": False, "message": f"Ошибка при загрузке файла: {e}"}
 
             if put.status_code not in (200, 201, 202):
                 return {"ok": False, "message": _json_error(put)}
 
-            return {"ok": True, "message": "Файл успешно загружен", "data": {"disk_path": disk_path, "file_size": os.path.getsize(local_path)}}
+            # Получаем ссылку на загруженный файл
+            file_info = requests.get(f"{BASE}/resources", headers=headers, params={"path": disk_path}, timeout=30)
+            if file_info.status_code == 200:
+                file_data = file_info.json()
+                file_link = file_data.get("public_url") or f"https://disk.yandex.ru/client/disk/{disk_path.replace('disk:/', '')}"
+            else:
+                file_link = f"https://disk.yandex.ru/client/disk/{disk_path.replace('disk:/', '')}"
+
+            return {"ok": True, "message": "Файл успешно загружен", "data": {"disk_path": disk_path, "file_url": file_link, "source_url": file_url, "file_size": len(file_data)}}
 
         # -------- DOWNLOAD --------
         elif action == "download":
-            if not local_path:
-                return {"ok": False, "message": "Не указан local_path"}
-
             # приватный файл (OAuth + disk_path)
             if token and disk_path:
                 headers = _auth_headers(token)
@@ -176,50 +307,20 @@ def yadisk_file_gateway(arguments):
             if not href:
                 return {"ok": False, "message": "Сервис не вернул href для скачивания"}
 
-            # подготовка локального файла
-            pathlib.Path(os.path.dirname(os.path.abspath(local_path)) or ".").mkdir(parents=True, exist_ok=True)
-            headers_dl = {}
-            existing_bytes = 0
-            mode = "wb"
-            if resume and os.path.exists(local_path):
-                existing_bytes = os.path.getsize(local_path)
-                if existing_bytes > 0:
-                    headers_dl["Range"] = f"bytes={existing_bytes}-"
-                    mode = "ab"
+            # Получаем информацию о файле для определения размера
+            file_size = None
+            if token and disk_path:
+                file_info = requests.get(f"{BASE}/resources", headers=headers, params={"path": disk_path}, timeout=30)
+                if file_info.status_code == 200:
+                    file_data = file_info.json()
+                    file_size = file_data.get("size")
 
-            dl = requests.get(href, headers=headers_dl, stream=True, timeout=600)
-            if dl.status_code not in (200, 206):
-                return {"ok": False, "message": _json_error(dl)}
-
-            # общий размер, если его отдали
-            total = None
-            if "Content-Length" in dl.headers:
-                try:
-                    total = int(dl.headers["Content-Length"]) + existing_bytes
-                except Exception:
-                    total = None
-
-            # читаем и пишем с прогрессом
-            def _choose_chunk_by_total(t):
-                return _choose_chunk_size(t, chunk_override)
-
-            chunk_size = _choose_chunk_by_total(total)
-            done, last_percent = existing_bytes, [None]
-
-            with open(local_path, mode) as f:
-                for chunk in dl.iter_content(chunk_size=chunk_size):
-                    if chunk:
-                        f.write(chunk)
-                        done += len(chunk)
-                        _print_progress("Downloading", done, total, last_percent, show_progress)
-            _print_progress("Downloading", done, total if total else done, last_percent, show_progress)
-
-            data = {"target_local_path": local_path, "bytes": done, "resumed_from": existing_bytes}
+            data = {"download_url": href, "file_size": file_size}
             if token and disk_path:
                 data.update({"disk_path": disk_path})
             else:
                 data.update({"public_key": public_key, "public_path": public_path})
-            return {"ok": True, "message": "Файл успешно скачан", "data": data}
+            return {"ok": True, "message": "Получена ссылка для скачивания", "data": data}
 
         # -------- RENAME --------
         elif action == "rename":
@@ -236,7 +337,16 @@ def yadisk_file_gateway(arguments):
             r = requests.post(f"{BASE}/resources/move", headers=headers, params=params, timeout=30)
             if r.status_code not in (200, 201, 202):
                 return {"ok": False, "message": _json_error(r)}
-            return {"ok": True, "message": f"Файл переименован в {new_name}", "data": {"old_path": from_path, "new_path": to_path}}
+            
+            # Получаем ссылку на переименованный файл
+            file_info = requests.get(f"{BASE}/resources", headers=headers, params={"path": to_path}, timeout=30)
+            if file_info.status_code == 200:
+                file_data = file_info.json()
+                file_link = file_data.get("public_url") or f"https://disk.yandex.ru/client/disk/{to_path.replace('disk:/', '')}"
+            else:
+                file_link = f"https://disk.yandex.ru/client/disk/{to_path.replace('disk:/', '')}"
+            
+            return {"ok": True, "message": f"Файл переименован в {new_name}", "data": {"old_path": from_path, "new_path": to_path, "file_url": file_link}}
 
         # -------- DELETE --------
         elif action == "delete":
@@ -270,15 +380,21 @@ def yadisk_file_gateway(arguments):
             embedded = j.get("_embedded", {})
             items = embedded.get("items", [])
             total = embedded.get("total", len(items))
-            simplified = [
-                {
+            simplified = []
+            for it in items:
+                item_data = {
                     "name": it.get("name"),
                     "type": it.get("type"),
                     "size": it.get("size"),
                     "mime_type": it.get("mime_type"),
                     "path": it.get("path")
-                } for it in items
-            ]
+                }
+                # Добавляем ссылку на файл, если это файл
+                if it.get("type") == "file":
+                    item_path = it.get("path", "")
+                    item_data["file_url"] = f"https://disk.yandex.ru/client/disk/{item_path.replace('disk:/', '')}"
+                simplified.append(item_data)
+            
             return {"ok": True, "message": f"Элементов: {len(simplified)} из {total}", "data": {"disk_path": disk_path, "total": total, "limit": limit, "offset": offset, "items": simplified}}
 
         else:
