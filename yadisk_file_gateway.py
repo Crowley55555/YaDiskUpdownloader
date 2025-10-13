@@ -101,7 +101,7 @@ def yadisk_file_gateway(arguments):
             except Exception:
                 pass
 
-    # file-like с прогрессом для upload из URL (адаптированная версия ProgressFile)
+    # file-like с прогрессом для upload из URL (загрузка в буфер, затем выгрузка)
     class ProgressURLFile:
         def __init__(self, url, show):
             self._url = url
@@ -114,19 +114,43 @@ def yadisk_file_gateway(arguments):
             self._data = None
             self._data_pos = 0
             
-            # Сначала загружаем весь файл в память для надежности
+            # Загружаем файл в буфер с надежными настройками
             try:
                 if self._show:
-                    sys.stdout.write("Загрузка файла с URL...\n")
+                    sys.stdout.write("Загрузка файла с URL в буфер...\n")
                     sys.stdout.flush()
                 
-                self._response = requests.get(url, timeout=600, allow_redirects=True)
+                # Настройки для надежного скачивания
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                    'Accept': '*/*',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                    'Accept-Encoding': 'identity',  # Отключаем сжатие для точности
+                    'Connection': 'keep-alive',
+                    'Cache-Control': 'no-cache'
+                }
+                
+                self._response = requests.get(
+                    url, 
+                    headers=headers,
+                    timeout=600, 
+                    allow_redirects=True,
+                    stream=False,  # Загружаем сразу в память
+                    verify=True    # Проверяем SSL сертификаты
+                )
                 self._response.raise_for_status()
+                
+                # Проверяем, что получили данные
+                if not self._response.content:
+                    raise Exception("Получен пустой файл")
+                
                 self._data = self._response.content
                 self._size = len(self._data)
                 
                 if self._show:
-                    sys.stdout.write(f"Файл загружен, размер: {self._size} байт\n")
+                    sys.stdout.write(f"Файл загружен в буфер, размер: {self._size} байт\n")
+                    sys.stdout.write(f"Content-Type: {self._response.headers.get('Content-Type', 'неизвестно')}\n")
+                    sys.stdout.write("Начинаем выгрузку на Яндекс.Диск...\n")
                     sys.stdout.flush()
                     
             except Exception as e:
@@ -142,7 +166,7 @@ def yadisk_file_gateway(arguments):
             if self._closed or self._data is None:
                 return b""
             
-            # Читаем из загруженных данных
+            # Читаем из буфера
             if self._data_pos >= len(self._data):
                 return b""
             
@@ -151,7 +175,7 @@ def yadisk_file_gateway(arguments):
             self._data_pos = end_pos
             self._read = self._data_pos
             
-            # Показываем прогресс
+            # Показываем прогресс выгрузки на диск
             if self._show and self._size > 0:
                 percent = int(self._read * 100 / self._size)
                 if percent != self._last_percent:
@@ -159,7 +183,7 @@ def yadisk_file_gateway(arguments):
                     bar_len = 30
                     filled = int(percent * bar_len / 100)
                     bar = "#" * filled + "-" * (bar_len - filled)
-                    sys.stdout.write(f"\rUploading from URL [{bar}] {percent:3d}%")
+                    sys.stdout.write(f"\rВыгрузка на диск [{bar}] {percent:3d}%")
                     sys.stdout.flush()
                     
                 if self._read >= self._size:
@@ -169,6 +193,13 @@ def yadisk_file_gateway(arguments):
                 
         def close(self):
             self._closed = True
+            # Освобождаем буфер из памяти
+            if self._data is not None:
+                if self._show:
+                    sys.stdout.write("Освобождение буфера из памяти...\n")
+                    sys.stdout.flush()
+                self._data = None
+            
             try:
                 if self._response:
                     self._response.close()

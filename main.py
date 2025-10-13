@@ -4,7 +4,7 @@ from yadisk_file_gateway import yadisk_file_gateway
 args = {
     "action": "upload",
     "oauth_token": "y0__xDIuu2XBxiR7TogncG82BTbb9rgDpTKFA68a9jdILc5cHhkcg",
-    "disk_path": "disk:/333.mp3",
+    "disk_path": "disk:/3333.mp3",
     # "local_path": "D:/143214321.mp3",  # локальный путь
     "file_url": "https://disk.yandex.ru/d/meIOCovSsHIPXg",  # ссылка на файл в интернете
     "overwrite": True,          # перезаписать, если уже есть
