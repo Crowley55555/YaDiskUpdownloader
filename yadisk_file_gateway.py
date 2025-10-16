@@ -12,6 +12,7 @@ def yadisk_file_gateway(arguments):
     import pathlib
     import sys
     import hashlib
+    import re  # Для парсинга HTML
     from typing import Optional, Dict, Any, Iterable
     import requests
     import urllib.request
@@ -68,38 +69,126 @@ def yadisk_file_gateway(arguments):
             sys.stdout.write(f"\r{prefix} {done_bytes} bytes...")
             sys.stdout.flush()
 
-    # file-like с прогрессом для upload (надёжнее, чем генератор + ручной Content-Length)
-    class ProgressFile:
-        def __init__(self, path, show):
-            self._f = open(path, "rb")
-            self._size = os.path.getsize(path)
-            self._read = 0
-            self._show = show
-            self._last_percent = None
-        def __len__(self):
-            return self._size
-        def read(self, amt=1024 * 1024):
-            chunk = self._f.read(amt)
-            if chunk:
-                self._read += len(chunk)
-                if self._show and self._size > 0:
-                    percent = int(self._read * 100 / self._size)
-                    if percent != self._last_percent:
-                        self._last_percent = percent
-                        bar_len = 30
-                        filled = int(percent * bar_len / 100)
-                        bar = "#" * filled + "-" * (bar_len - filled)
-                        sys.stdout.write(f"\rUploading [{bar}] {percent:3d}%")
-                        sys.stdout.flush()
+    # --- Функция для извлечения прямой ссылки на файл из публичной ссылки Яндекс.Диска ---
+    def _extract_direct_download_url(public_url: str, show_progress: bool = False) -> Optional[str]:
+        """
+        Пытается извлечь прямую ссылку на скачивание из публичной ссылки Яндекс.Диска.
+        Это может быть необходимо, если пользователь предоставил ссылку типа https://disk.yandex.ru/...
+        """
+        if not public_url or not public_url.startswith("https://disk.yandex.ru/"):
+            if show_progress:
+                sys.stdout.write(f"URL не является публичной ссылкой Яндекс.Диска: {public_url}\n")
+            return None
+
+        # Попробуем получить HTML страницу
+        try:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept-Encoding': 'identity',
+                'Connection': 'keep-alive',
+                'Cache-Control': 'no-cache'
+            }
+
+            # Получаем HTML страницу
+            if show_progress:
+                sys.stdout.write(f"Получение HTML страницы: {public_url}\n")
+            response = requests.get(public_url, headers=headers, timeout=30, allow_redirects=True)
+            response.raise_for_status()
+
+            # Ищем скрипт с данными, содержащими downloadUrl
+            # Это может быть нестабильно, но часто работает
+            html_content = response.text
+            # Пример регулярного выражения для поиска downloadUrl (может потребоваться доработка)
+            # Паттерн может меняться, поэтому проверяйте, соответствует ли он реальному содержимому страницы
+            # Этот шаблон может быть не самым надежным, но работает для простых случаев
+            match = re.search(r'"downloadUrl":"([^"]+)"', html_content)
+            if match:
+                download_url = match.group(1)
+                # Убедимся, что URL корректен и начинается с https://downloader.disk.yandex.ru/
+                if download_url.startswith("https://downloader.disk.yandex.ru/"):
+                    if show_progress:
+                        sys.stdout.write(f"Найдена прямая ссылка: {download_url}\n")
+                    return download_url
+                else:
+                    if show_progress:
+                        sys.stdout.write(f"Найдена ссылка, но не прямая: {download_url}\n")
             else:
-                if self._show and self._size > 0:
-                    sys.stdout.write("\n")
-            return chunk
-        def close(self):
-            try:
-                self._f.close()
-            except Exception:
-                pass
+                if show_progress:
+                    sys.stdout.write("Не удалось найти downloadUrl в HTML.\n")
+
+            # Попробуем найти другие возможные пути (например, ссылки в JS)
+            # Ищем ссылки вида "https://downloader.disk.yandex.ru/..." в JS
+            # Это более сложный подход, но может помочь
+            js_match = re.search(r'https://downloader\.disk\.yandex\.ru/[^\s"\']+', html_content)
+            if js_match:
+                direct_url = js_match.group(0)
+                if show_progress:
+                    sys.stdout.write(f"Найдена прямая ссылка через JS: {direct_url}\n")
+                return direct_url
+            else:
+                if show_progress:
+                    sys.stdout.write("Не удалось найти прямую ссылку через JS.\n")
+
+            # Если ничего не нашли, возможно, это ссылка на публичную папку или не тот формат
+            # Попробуем найти данные о файле в JSON внутри HTML (часто встречается)
+            # Поиск JSON-объекта с информацией о файле
+            # Пример: <script id="react-data">{"someKey":"someValue"}</script>
+            data_match = re.search(r'<script[^>]*id=["\']react-data["\'][^>]*>(.*?)</script>', html_content, re.DOTALL)
+            if data_match:
+                try:
+                    json_data_str = data_match.group(1)
+                    # Попробуем найти downloadUrl в этом JSON
+                    # Простой парсинг, может не всегда работать
+                    json_data = json.loads(json_data_str)
+
+                    # Ищем в структуре, например, если есть ключи с downloadUrl
+                    # Это зависит от внутренней структуры данных Яндекс.Диска
+                    # Ниже пример для общего случая
+                    def find_download_url(obj):
+                        if isinstance(obj, dict):
+                            if 'downloadUrl' in obj:
+                                return obj['downloadUrl']
+                            for value in obj.values():
+                                result = find_download_url(value)
+                                if result:
+                                    return result
+                        elif isinstance(obj, list):
+                            for item in obj:
+                                result = find_download_url(item)
+                                if result:
+                                    return result
+                        return None
+
+                    found_url = find_download_url(json_data)
+                    if found_url and found_url.startswith("https://downloader.disk.yandex.ru/"):
+                        if show_progress:
+                            sys.stdout.write(f"Найдена прямая ссылка через JSON: {found_url}\n")
+                        return found_url
+                    else:
+                        if show_progress:
+                            sys.stdout.write(f"Найдена ссылка из JSON, но не прямая: {found_url}\n")
+                except Exception as e:
+                    if show_progress:
+                        sys.stdout.write(f"Ошибка парсинга JSON: {e}\n")
+            else:
+                if show_progress:
+                    sys.stdout.write("Не найден JSON с данными.\n")
+
+            # Если ничего не нашли
+            if show_progress:
+                sys.stdout.write("Не удалось извлечь прямую ссылку из HTML.\n")
+            return None
+
+        except requests.exceptions.RequestException as e:
+            if show_progress:
+                sys.stdout.write(f"Ошибка при получении страницы: {e}\n")
+            return None
+        except Exception as e:
+            if show_progress:
+                sys.stdout.write(f"Ошибка при парсинге: {e}\n")
+            return None
 
     # file-like с прогрессом для upload из URL (загрузка в буфер, затем выгрузка)
     class ProgressURLFile:
@@ -113,13 +202,14 @@ def yadisk_file_gateway(arguments):
             self._closed = False
             self._data = None
             self._data_pos = 0
-            
+            self._error = None
+
             # Загружаем файл в буфер с надежными настройками
             try:
                 if self._show:
                     sys.stdout.write("Загрузка файла с URL в буфер...\n")
                     sys.stdout.flush()
-                
+
                 # Настройки для надежного скачивания
                 headers = {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
@@ -129,52 +219,101 @@ def yadisk_file_gateway(arguments):
                     'Connection': 'keep-alive',
                     'Cache-Control': 'no-cache'
                 }
-                
+
+                # Используем stream=True для более точного контроля
                 self._response = requests.get(
-                    url, 
+                    url,
                     headers=headers,
-                    timeout=600, 
+                    timeout=600,
                     allow_redirects=True,
-                    stream=False,  # Загружаем сразу в память
-                    verify=True    # Проверяем SSL сертификаты
+                    stream=True,  # Важно: потоковое скачивание
+                    verify=True  # Проверяем SSL сертификаты
                 )
+
+                # Проверяем статус код после открытия соединения
                 self._response.raise_for_status()
-                
-                # Проверяем, что получили данные
-                if not self._response.content:
-                    raise Exception("Получен пустой файл")
-                
-                self._data = self._response.content
+
+                # Проверка Content-Type
+                content_type = self._response.headers.get('Content-Type', '')
+                if 'text/html' in content_type.lower():
+                    self._error = f"Получен HTML-ответ ({content_type}) вместо файла! Проверьте URL."
+                    if self._show:
+                        sys.stdout.write(f"Ошибка: {self._error}\n")
+                    self._data = b""
+                    self._size = 0
+                    return
+
+                # Проверка Content-Disposition для определения имени файла
+                content_disposition = self._response.headers.get('Content-Disposition', '')
+                if 'filename=' in content_disposition:
+                    filename = content_disposition.split('filename=')[1].strip('"\'')
+                    if self._show:
+                        sys.stdout.write(f"Имя файла по заголовку: {filename}\n")
+
+                # Читаем данные по частям и сохраняем в буфер
+                self._data = b""
+                total_read = 0
+                chunk_size = 8192
+                max_chunks = 100000  # Ограничение на количество чанков для безопасности
+
+                for i, chunk in enumerate(self._response.iter_content(chunk_size=chunk_size)):
+                    if chunk:  # Пропускаем пустые чанки
+                        self._data += chunk
+                        total_read += len(chunk)
+                        if self._show and i % 10 == 0:  # Обновление прогресса каждые 10 чанков
+                            sys.stdout.write(f"\rЗагружено: {total_read} байт")
+                            sys.stdout.flush()
+
+                    if i >= max_chunks:
+                        # Ограничиваем размер файла для предотвращения переполнения памяти
+                        if self._show:
+                            sys.stdout.write(f"\nДостигнут лимит чанков ({max_chunks}), прекращаем загрузку.\n")
+                        break
+
                 self._size = len(self._data)
-                
+
+                # Проверяем, что файл имеет размер > 0
+                if self._size == 0:
+                    self._error = "Файл пустой (размер 0 байт)"
+                    if self._show:
+                        sys.stdout.write(f"\nОшибка: {self._error}\n")
+                    return
+
                 if self._show:
-                    sys.stdout.write(f"Файл загружен в буфер, размер: {self._size} байт\n")
-                    sys.stdout.write(f"Content-Type: {self._response.headers.get('Content-Type', 'неизвестно')}\n")
+                    sys.stdout.write(f"\nФайл загружен в буфер, размер: {self._size} байт\n")
+                    sys.stdout.write(f"Content-Type: {content_type}\n")
                     sys.stdout.write("Начинаем выгрузку на Яндекс.Диск...\n")
                     sys.stdout.flush()
-                    
-            except Exception as e:
+
+            except requests.exceptions.RequestException as e:
+                self._error = f"Ошибка сети при загрузке файла: {e}"
                 if self._show:
-                    sys.stdout.write(f"\nОшибка при загрузке файла: {e}\n")
+                    sys.stdout.write(f"\nОшибка: {self._error}\n")
                 self._data = b""
                 self._size = 0
-                
+            except Exception as e:
+                self._error = f"Неожиданная ошибка при загрузке файла: {e}"
+                if self._show:
+                    sys.stdout.write(f"\nОшибка: {self._error}\n")
+                self._data = b""
+                self._size = 0
+
         def __len__(self):
             return self._size
-            
+
         def read(self, amt=1024 * 1024):
             if self._closed or self._data is None:
                 return b""
-            
+
             # Читаем из буфера
             if self._data_pos >= len(self._data):
                 return b""
-            
+
             end_pos = min(self._data_pos + amt, len(self._data))
             chunk = self._data[self._data_pos:end_pos]
             self._data_pos = end_pos
             self._read = self._data_pos
-            
+
             # Показываем прогресс выгрузки на диск
             if self._show and self._size > 0:
                 percent = int(self._read * 100 / self._size)
@@ -185,12 +324,12 @@ def yadisk_file_gateway(arguments):
                     bar = "#" * filled + "-" * (bar_len - filled)
                     sys.stdout.write(f"\rВыгрузка на диск [{bar}] {percent:3d}%")
                     sys.stdout.flush()
-                    
+
                 if self._read >= self._size:
                     sys.stdout.write("\n")
-                    
+
             return chunk
-                
+
         def close(self):
             self._closed = True
             # Освобождаем буфер из памяти
@@ -199,12 +338,20 @@ def yadisk_file_gateway(arguments):
                     sys.stdout.write("Освобождение буфера из памяти...\n")
                     sys.stdout.flush()
                 self._data = None
-            
+
             try:
                 if self._response:
                     self._response.close()
             except Exception:
                 pass
+
+        def has_error(self):
+            """Возвращает True, если произошла ошибка при загрузке"""
+            return self._error is not None
+
+        def get_error(self):
+            """Возвращает сообщение об ошибке"""
+            return self._error
 
     # ---------- args ----------
     action = arguments.get("action")
@@ -232,16 +379,38 @@ def yadisk_file_gateway(arguments):
                 return {"ok": False, "message": "Для upload требуется oauth_token"}
             if not disk_path:
                 return {"ok": False, "message": "Для upload требуется disk_path"}
-            
-            # Проверяем, что указан либо local_path, либо file_url
-            if not local_path and not file_url:
-                return {"ok": False, "message": "Для upload требуется либо local_path, либо file_url"}
-            if local_path and file_url:
-                return {"ok": False, "message": "Укажите либо local_path, либо file_url, но не оба"}
-            
-            # Проверяем локальный файл
-            if local_path and not os.path.isfile(local_path):
-                return {"ok": False, "message": f"Файл не найден: {local_path}"}
+
+            # Проверяем, что указан file_url (локальная загрузка удалена)
+            if not file_url:
+                return {"ok": False, "message": "Для upload требуется file_url"}
+            if local_path:
+                return {"ok": False, "message": "Локальная загрузка не поддерживается. Используйте file_url."}
+
+            # --- Попытка извлечь прямую ссылку ---
+            # Проверим, является ли file_url прямой ссылкой
+            direct_url = file_url
+            if show_progress:
+                sys.stdout.write(f"Проверка ссылки: {file_url}\n")
+            if not file_url.startswith(("http://", "https://")):
+                return {"ok": False, "message": "Указанная ссылка не является URL."}
+            # Проверим, если это публичная ссылка (не прямая)
+            # Для Яндекс.Диска: если это не downloader.disk.yandex.ru
+            if "disk.yandex.ru" in file_url and not file_url.startswith("https://downloader.disk.yandex.ru/"):
+                if show_progress:
+                    sys.stdout.write("Публичная ссылка Яндекс.Диска, попытка извлечь прямую...\n")
+                direct_url = _extract_direct_download_url(file_url, show_progress)
+                if not direct_url:
+                    return {"ok": False,
+                            "message": "Не удалось извлечь прямую ссылку на файл. Убедитесь, что указана прямая ссылка на файл."}
+            else:
+                # Проверим, является ли это прямой ссылкой (на случай, если пользователь уже указал её)
+                # Можно добавить проверку доступности файла
+                try:
+                    check_resp = requests.head(file_url, timeout=10)
+                    if check_resp.status_code >= 400:
+                        return {"ok": False, "message": f"Указанная ссылка недоступна (код {check_resp.status_code})."}
+                except Exception as e:
+                    return {"ok": False, "message": f"Ошибка проверки ссылки: {e}"}
 
             headers = _auth_headers(token)
             params = {"path": disk_path, "overwrite": "true" if overwrite else "false"}
@@ -252,15 +421,26 @@ def yadisk_file_gateway(arguments):
             if not href:
                 return {"ok": False, "message": "Не получена ссылка для загрузки"}
 
-            # Выбираем класс в зависимости от источника
-            if local_path:
-                pf = ProgressFile(local_path, show_progress)
-                file_size = os.path.getsize(local_path)
-            else:
-                pf = ProgressURLFile(file_url, show_progress)
-                file_size = len(pf)  # размер из HEAD запроса
-                
+            # Используем ProgressURLFile для загрузки по URL
+            pf = ProgressURLFile(direct_url, show_progress)  # Используем direct_url
+
+            # Проверяем, произошла ли ошибка при загрузке файла
+            if pf.has_error():
+                error_msg = pf.get_error()
+                if show_progress:
+                    sys.stdout.write(f"Ошибка при загрузке файла: {error_msg}\n")
+                return {"ok": False, "message": f"Не удалось загрузить файл с URL: {error_msg}"}
+
+            file_size = len(pf)  # размер из буфера
+
+            # Проверяем, удалось ли загрузить файл в буфер
+            if file_size == 0:
+                if show_progress:
+                    sys.stdout.write("Файл не был загружен в буфер. Проверьте URL и подключение.\n")
+                return {"ok": False, "message": "Не удалось загрузить файл с URL. Проверьте URL и подключение."}
+
             try:
+                # Используем data=pf, который реализует read()
                 put = requests.put(
                     href,
                     data=pf,
@@ -273,7 +453,37 @@ def yadisk_file_gateway(arguments):
             if put.status_code not in (200, 201, 202):
                 return {"ok": False, "message": _json_error(put)}
 
-            return {"ok": True, "message": "Файл успешно загружен", "data": {"disk_path": disk_path, "file_size": file_size}}
+            # --- Получение ссылки на загруженный файл ---
+            # После успешной загрузки получаем публичную ссылку
+            try:
+                file_info = requests.get(f"{BASE}/resources", headers=headers, params={"path": disk_path}, timeout=30)
+                if file_info.status_code == 200:
+                    file_data = file_info.json()
+                    file_url_on_disk = file_data.get("public_url")
+                    if file_url_on_disk:
+                        if show_progress:
+                            sys.stdout.write(f"Получена публичная ссылка на файл: {file_url_on_disk}\n")
+                    else:
+                        # Если нет public_url, формируем ссылку вручную
+                        # Это не всегда корректно, но может быть полезно
+                        file_url_on_disk = f"https://disk.yandex.ru/client/disk/{disk_path.replace('disk:/', '')}"
+                        if show_progress:
+                            sys.stdout.write(f"Сформирована ссылка на файл: {file_url_on_disk}\n")
+                else:
+                    file_url_on_disk = f"https://disk.yandex.ru/client/disk/{disk_path.replace('disk:/', '')}"
+                    if show_progress:
+                        sys.stdout.write(
+                            f"Не удалось получить публичную ссылку, сформирована ссылка: {file_url_on_disk}\n")
+            except Exception as e:
+                file_url_on_disk = f"https://disk.yandex.ru/client/disk/{disk_path.replace('disk:/', '')}"
+                if show_progress:
+                    sys.stdout.write(f"Ошибка получения ссылки: {e}. Используется стандартная: {file_url_on_disk}\n")
+
+            return {"ok": True, "message": "Файл успешно загружен", "data": {
+                "disk_path": disk_path,
+                "file_size": file_size,
+                "file_url": file_url_on_disk  # <-- Добавлена ссылка на загруженный файл
+            }}
 
         # -------- DOWNLOAD --------
         elif action == "download":
@@ -326,16 +536,18 @@ def yadisk_file_gateway(arguments):
             r = requests.post(f"{BASE}/resources/move", headers=headers, params=params, timeout=30)
             if r.status_code not in (200, 201, 202):
                 return {"ok": False, "message": _json_error(r)}
-            
+
             # Получаем ссылку на переименованный файл
             file_info = requests.get(f"{BASE}/resources", headers=headers, params={"path": to_path}, timeout=30)
             if file_info.status_code == 200:
                 file_data = file_info.json()
-                file_link = file_data.get("public_url") or f"https://disk.yandex.ru/client/disk/{to_path.replace('disk:/', '')}"
+                file_link = file_data.get(
+                    "public_url") or f"https://disk.yandex.ru/client/disk/{to_path.replace('disk:/', '')}"
             else:
                 file_link = f"https://disk.yandex.ru/client/disk/{to_path.replace('disk:/', '')}"
-            
-            return {"ok": True, "message": f"Файл переименован в {new_name}", "data": {"old_path": from_path, "new_path": to_path, "file_url": file_link}}
+
+            return {"ok": True, "message": f"Файл переименован в {new_name}",
+                    "data": {"old_path": from_path, "new_path": to_path, "file_url": file_link}}
 
         # -------- DELETE --------
         elif action == "delete":
@@ -344,10 +556,11 @@ def yadisk_file_gateway(arguments):
             if not disk_path:
                 return {"ok": False, "message": "Для delete требуется disk_path"}
             headers = _auth_headers(token)
-            r = requests.delete(f"{BASE}/resources", headers=headers, params={"path": disk_path, "permanently": "true"}, timeout=30)
+            r = requests.delete(f"{BASE}/resources", headers=headers, params={"path": disk_path, "permanently": "true"},
+                                timeout=30)
             if r.status_code not in (202, 204):
                 return {"ok": False, "message": _json_error(r)}
-            return {"ok": True, "message": "Файл удалён", "data": {"disk_path": disk_path}}
+            return {"ok": True, "message": "Файл удален", "data": {"disk_path": disk_path}}
 
         # -------- LIST --------
         elif action == "list":
@@ -383,8 +596,10 @@ def yadisk_file_gateway(arguments):
                     item_path = it.get("path", "")
                     item_data["file_url"] = f"https://disk.yandex.ru/client/disk/{item_path.replace('disk:/', '')}"
                 simplified.append(item_data)
-            
-            return {"ok": True, "message": f"Элементов: {len(simplified)} из {total}", "data": {"disk_path": disk_path, "total": total, "limit": limit, "offset": offset, "items": simplified}}
+
+            return {"ok": True, "message": f"Элементов: {len(simplified)} из {total}",
+                    "data": {"disk_path": disk_path, "total": total, "limit": limit, "offset": offset,
+                             "items": simplified}}
 
         else:
             return {"ok": False, "message": f"Неизвестное действие: {action}"}
