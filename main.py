@@ -1,32 +1,32 @@
 from yadisk_file_gateway import yadisk_file_gateway
 
-# Загрузка файла по URL на Яндекс.Диск
-args = {
-    "action": "upload",
-    "oauth_token": "",
-    "disk_path": "disk:/MirON42_feat._WANTARAM__CWAMI_-_Devochka_solntse.mp3",
-    # "local_path": "D:/143214321.mp3",  # локальный путь
-    "file_url": "https://mp3bob.ru/download/muz18/MirON42_feat._WANTARAM__CWAMI_-_Devochka_solntse.mp3",  # ссылка на файл в интернете
-    "overwrite": True,          # перезаписать, если уже есть
-    "show_progress": True       # показать прогресс-бар
-}
-print(yadisk_file_gateway(args))
+# # Загрузка файла по URL на Яндекс.Диск
+# args = {
+#     "action": "upload",
+#     "oauth_token": "YOUR_OAUTH_TOKEN_HERE",  # Замените на ваш токен
+#     "disk_path": "disk:/MirON42_feat._WANTARAM__CWAMI_-_Devochka_solntse.mp3",
+#     # "local_path": "D:/143214321.mp3",  # локальный путь
+#     "file_url": "https://mp3bob.ru/download/muz18/MirON42_feat._WANTARAM__CWAMI_-_Devochka_solntse.mp3",  # ссылка на файл в интернете
+#     "overwrite": True,          # перезаписать, если уже есть
+#     "show_progress": True       # показать прогресс-бар
+# }
+# print(yadisk_file_gateway(args))
 
 # # Получение ссылки для скачивания приватного файла (по OAuth)
 # args = {
 #     "action": "download",
-#     "oauth_token": "<YA_OAUTH_TOKEN>",
-#     "disk_path": "disk:/file1.mp3"
+#     "oauth_token": "",  # Замените на ваш токен
+#     "disk_path": "disk:/file3.mp3"
 # }
 # print(yadisk_file_gateway(args))
 #
-# # Получение ссылки для скачивания по публичной ссылке (без OAuth)
-# args = {
-#     "action": "download",
-#     "public_key": "https://disk.yandex.ru/d/NS-00uW07T-EsQ",
-#     "public_path": ""   # опционально (если в опубликованной папке)
-# }
-# print(yadisk_file_gateway(args))
+# Получение ссылки для скачивания по публичной ссылке (без OAuth)
+args = {
+    "action": "download",
+    "public_key": "https://disk.yandex.ru/d/nkiBskZzyG5rNw",
+    "public_path": ""   # опционально (если в опубликованной папке)
+}
+print(yadisk_file_gateway(args))
 #
 # Переименование файла
 # args = {

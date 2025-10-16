@@ -9,14 +9,11 @@ def yadisk_file_gateway(arguments):
     """
     import os
     import json
-    import pathlib
     import sys
-    import hashlib
     import re  # Для парсинга HTML
-    from typing import Optional, Dict, Any, Iterable
+    import time  # Для retry логики
+    from typing import Optional, Dict, Any
     import requests
-    import urllib.request
-    import urllib.parse
 
     BASE = "https://cloud-api.yandex.net/v1/disk"
 
@@ -133,7 +130,26 @@ def yadisk_file_gateway(arguments):
         """
         Выполняет HTTP запрос с повторными попытками при ошибках
         """
-        import time
+        
+        # Специальные заголовки для Google Colab
+        colab_headers = {
+            'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': '*/*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Cache-Control': 'max-age=0'
+        }
+        
+        # Добавляем заголовки если их нет
+        if 'headers' not in kwargs:
+            kwargs['headers'] = colab_headers
+        else:
+            kwargs['headers'].update(colab_headers)
         
         for attempt in range(max_retries):
             try:
@@ -167,6 +183,244 @@ def yadisk_file_gateway(arguments):
                     raise e
         
         return response
+
+    def _detect_environment() -> str:
+        """
+        Определяет среду выполнения (Google Colab, Jupyter, обычный Python)
+        """
+        try:
+            import google.colab
+            return "colab"
+        except ImportError:
+            try:
+                import IPython
+                if IPython.get_ipython() is not None:
+                    return "jupyter"
+            except ImportError:
+                pass
+        return "python"
+
+    def _get_colab_cache_dir() -> str:
+        """
+        Получает путь к директории кэша для Google Colab
+        """
+        cache_dir = "/content/yadisk_cache"
+        if not os.path.exists(cache_dir):
+            os.makedirs(cache_dir)
+        return cache_dir
+
+    def _save_to_colab_cache(file_data: bytes, filename: str, show_progress: bool = False) -> str:
+        """
+        Сохраняет файл в кэш Google Colab и возвращает путь к файлу
+        """
+        try:
+            cache_dir = _get_colab_cache_dir()
+            file_path = os.path.join(cache_dir, filename)
+            
+            with open(file_path, "wb") as f:
+                f.write(file_data)
+            
+            if show_progress:
+                sys.stdout.write(f"Файл сохранен в кэш: {file_path}\n")
+            
+            return file_path
+        except Exception as e:
+            if show_progress:
+                sys.stdout.write(f"Ошибка сохранения в кэш: {e}\n")
+            return None
+
+    def _create_colab_download_link(file_path: str, filename: str, show_progress: bool = False) -> str:
+        """
+        Создает HTML-страницу для скачивания файла из кэша Google Colab
+        """
+        try:
+            # Создаем уникальное имя для HTML файла
+            html_filename = f"download_{filename}_{int(time.time())}.html"
+            html_path = os.path.join(_get_colab_cache_dir(), html_filename)
+            
+            # Создаем HTML-страницу с автоматическим скачиванием
+            html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Скачивание файла: {filename}</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; margin: 40px; }}
+        .download-btn {{ 
+            background-color: #4CAF50; 
+            color: white; 
+            padding: 15px 32px; 
+            text-align: center; 
+            text-decoration: none; 
+            display: inline-block; 
+            font-size: 16px; 
+            margin: 4px 2px; 
+            cursor: pointer; 
+            border-radius: 4px;
+        }}
+        .info {{ background-color: #f0f0f0; padding: 15px; border-radius: 4px; margin: 20px 0; }}
+    </style>
+    <script>
+        // Автоматическое скачивание при загрузке страницы
+        window.onload = function() {{
+            var link = document.createElement('a');
+            link.href = '/content/yadisk_cache/{filename}';
+            link.download = '{filename}';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            
+            // Показываем сообщение
+            document.getElementById('message').innerHTML = 'Файл скачивается...';
+        }};
+    </script>
+</head>
+<body>
+    <h2>📁 Скачивание файла: {filename}</h2>
+    <div class="info">
+        <p><strong>Статус:</strong> <span id="message">Подготовка к скачиванию...</span></p>
+        <p><strong>Размер файла:</strong> {os.path.getsize(file_path) if os.path.exists(file_path) else 'Неизвестно'} байт</p>
+        <p><strong>Время создания:</strong> {time.strftime('%Y-%m-%d %H:%M:%S')}</p>
+    </div>
+    
+    <p>Если скачивание не началось автоматически:</p>
+    <a href="/content/yadisk_cache/{filename}" download="{filename}" class="download-btn">
+        📥 Скачать файл
+    </a>
+    
+    <div class="info">
+        <h3>Инструкции:</h3>
+        <ol>
+            <li>Файл должен скачаться автоматически</li>
+            <li>Если не работает, нажмите кнопку "Скачать файл" выше</li>
+            <li>Файл также доступен по пути: <code>/content/yadisk_cache/{filename}</code></li>
+        </ol>
+    </div>
+</body>
+</html>"""
+            
+            with open(html_path, "w", encoding="utf-8") as f:
+                f.write(html_content)
+            
+            if show_progress:
+                sys.stdout.write(f"Создана HTML-страница для скачивания: {html_path}\n")
+            
+            return html_path
+        except Exception as e:
+            if show_progress:
+                sys.stdout.write(f"Ошибка создания HTML-страницы: {e}\n")
+            return None
+
+    def _download_file_from_url(url: str, show_progress: bool = False) -> Optional[bytes]:
+        """
+        Скачивает файл по URL в память
+        """
+        try:
+            if show_progress:
+                sys.stdout.write(f"Скачиваем файл по URL: {url[:100]}...\n")
+            
+            # Специальные заголовки для обхода блокировок
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Accept': '*/*',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Connection': 'keep-alive',
+                'Referer': 'https://disk.yandex.ru/',
+                'Sec-Fetch-Dest': 'empty',
+                'Sec-Fetch-Mode': 'cors',
+                'Sec-Fetch-Site': 'cross-site'
+            }
+            
+            file_response = requests.get(url, headers=headers, stream=True, timeout=300, allow_redirects=True)
+            file_response.raise_for_status()
+            
+            # Читаем файл по частям
+            file_data = b""
+            total_size = int(file_response.headers.get('Content-Length', 0))
+            downloaded = 0
+            
+            for chunk in file_response.iter_content(chunk_size=8192):
+                if chunk:
+                    file_data += chunk
+                    downloaded += len(chunk)
+                    if show_progress and total_size > 0:
+                        percent = int(downloaded * 100 / total_size)
+                        sys.stdout.write(f"\rСкачивание: {percent}% ({downloaded}/{total_size} байт)")
+                        sys.stdout.flush()
+                    elif show_progress:
+                        sys.stdout.write(f"\rСкачано: {downloaded} байт")
+                        sys.stdout.flush()
+            
+            if show_progress:
+                sys.stdout.write(f"\nФайл скачан: {len(file_data)} байт\n")
+            
+            return file_data
+            
+        except Exception as e:
+            if show_progress:
+                sys.stdout.write(f"Ошибка скачивания по URL: {e}\n")
+            return None
+
+    def _download_file_directly(token: str, disk_path: str, show_progress: bool = False) -> Optional[bytes]:
+        """
+        Скачивает файл напрямую в память (для Google Colab)
+        """
+        try:
+            headers = _auth_headers(token)
+            
+            # Получаем ссылку для скачивания
+            download_resp = _make_request_with_retry("GET", f"{BASE}/resources/download", 
+                                                   headers=headers, params={"path": disk_path}, timeout=30)
+            if download_resp.status_code != 200:
+                return None
+            
+            href = download_resp.json().get("href")
+            if not href:
+                return None
+            
+            # Скачиваем файл по полученной ссылке
+            return _download_file_from_url(href, show_progress)
+            
+        except Exception as e:
+            if show_progress:
+                sys.stdout.write(f"Ошибка прямого скачивания: {e}\n")
+            return None
+
+    def _get_colab_compatible_url(token: str, disk_path: str, show_progress: bool = False) -> Optional[str]:
+        """
+        Получает URL, совместимый с Google Colab
+        """
+        try:
+            headers = _auth_headers(token)
+            
+            # Пытаемся получить информацию о файле
+            file_info = _make_request_with_retry("GET", f"{BASE}/resources", 
+                                               headers=headers, params={"path": disk_path}, timeout=30)
+            if file_info.status_code != 200:
+                return None
+            
+            file_data = file_info.json()
+            
+            # Пытаемся получить прямую ссылку для скачивания
+            download_resp = _make_request_with_retry("GET", f"{BASE}/resources/download", 
+                                                   headers=headers, params={"path": disk_path}, timeout=30)
+            if download_resp.status_code == 200:
+                href = download_resp.json().get("href")
+                if href:
+                    # Для Google Colab добавляем специальные параметры
+                    if "?" in href:
+                        href += "&disposition=attachment"
+                    else:
+                        href += "?disposition=attachment"
+                    return href
+            
+            return None
+            
+        except Exception as e:
+            if show_progress:
+                sys.stdout.write(f"Ошибка получения Colab-совместимого URL: {e}\n")
+            return None
 
     def _get_public_url(token: str, disk_path: str, show_progress: bool = False) -> Optional[str]:
         """
@@ -478,16 +732,16 @@ def yadisk_file_gateway(arguments):
                                 bar = "#" * filled + "-" * (bar_len - filled)
                                 sys.stdout.write(f"\rЗагрузка на диск [{bar}] {percent:3d}%")
                                 sys.stdout.flush()
-                                
-                                if self._read >= self._size:
-                                    sys.stdout.write("\n")
+
+                            if self._read >= self._size:
+                                sys.stdout.write("\n")
                         else:
                             # Если размер неизвестен, показываем в байтах
                             sys.stdout.write(f"\rЗагружено: {self._read} байт")
                             sys.stdout.flush()
-                
+
                 return chunk
-                
+
             except StopIteration:
                 # Поток закончился
                 if self._show and self._size == 0:
@@ -534,11 +788,15 @@ def yadisk_file_gateway(arguments):
     public_path = arguments.get("public_path")
     limit = int(arguments.get("limit", 100))
     offset = int(arguments.get("offset", 0))
+    direct_download = bool(arguments.get("direct_download", False))  # Прямое скачивание для Colab
 
     # Валидация входных параметров
     validation_error = _validate_inputs(arguments)
     if validation_error:
         return {"ok": False, "message": validation_error}
+    
+    # Определяем среду выполнения один раз для всех операций
+    environment = _detect_environment()
 
     try:
         # -------- UPLOAD --------
@@ -602,18 +860,11 @@ def yadisk_file_gateway(arguments):
             # Получаем размер файла из заголовков (может быть 0 если неизвестен)
             file_size = len(pf)  # размер из заголовков HTTP
 
-            # Проверяем, что соединение установлено успешно
-            if pf.has_error():
-                error_msg = pf.get_error()
-                if show_progress:
-                    sys.stdout.write(f"Ошибка при инициализации соединения: {error_msg}\n")
-                return {"ok": False, "message": f"Не удалось установить соединение с URL: {error_msg}"}
-
             try:
                 # Используем data=pf, который реализует read()
                 put = _make_request_with_retry("PUT", href, max_retries=2,  # Меньше попыток для больших файлов
-                                             data=pf,
-                                             headers={"Content-Type": "application/octet-stream"},
+                    data=pf,
+                    headers={"Content-Type": "application/octet-stream"},
                                              timeout=600)
             finally:
                 pf.close()
@@ -638,34 +889,257 @@ def yadisk_file_gateway(arguments):
 
         # -------- DOWNLOAD --------
         elif action == "download":
+            if show_progress:
+                sys.stdout.write(f"Обнаружена среда выполнения: {environment}\n")
+            
             # приватный файл (OAuth + disk_path)
             if token and disk_path:
                 headers = _auth_headers(token)
-                r = requests.get(f"{BASE}/resources/download", headers=headers, params={"path": disk_path}, timeout=30)
+                
+                # Сначала получаем информацию о файле
+                file_info = _make_request_with_retry("GET", f"{BASE}/resources", 
+                                                   headers=headers, params={"path": disk_path}, timeout=30)
+                if file_info.status_code != 200:
+                    return {"ok": False, "message": f"Файл не найден: {_json_error(file_info)}"}
+                
+                file_data = file_info.json()
+                file_size = file_data.get("size")
+                
+                href = None
+                
+                # Для Google Colab используем специальную обработку
+                if environment == "colab":
+                    if show_progress:
+                        sys.stdout.write("Используем специальную обработку для Google Colab...\n")
+                    
+                    # Для Google Colab всегда используем кэш
+                    if show_progress:
+                        sys.stdout.write("Скачивание файла в кэш Google Colab...\n")
+                    
+                    file_data = _download_file_directly(token, disk_path, show_progress)
+                    if file_data:
+                        # Определяем имя файла
+                        filename = os.path.basename(disk_path.replace("disk:/", ""))
+                        if not filename:
+                            filename = f"downloaded_file_{int(time.time())}"
+                        
+                        # Сохраняем файл в кэш
+                        cached_file_path = _save_to_colab_cache(file_data, filename, show_progress)
+                        if cached_file_path:
+                            # Создаем HTML-страницу для скачивания
+                            html_path = _create_colab_download_link(cached_file_path, filename, show_progress)
+                            
+                            if show_progress:
+                                sys.stdout.write(f"Файл сохранен в кэш: {cached_file_path}\n")
+                                if html_path:
+                                    sys.stdout.write(f"HTML-страница создана: {html_path}\n")
+                            
+                            return {
+                                "ok": True, 
+                                "message": "Файл успешно скачан и сохранен в кэш", 
+                                "data": {
+                                    "filename": filename,
+                                    "file_size": len(file_data),
+                                    "environment": environment,
+                                    "download_method": "colab_cache",
+                                    "disk_path": disk_path,
+                                    "cached_file_path": cached_file_path,
+                                    "html_download_page": html_path,
+                                    "direct_file_url": f"/content/yadisk_cache/{filename}",
+                                    "instructions": [
+                                        f"1. Файл сохранен в кэш: {cached_file_path}",
+                                        f"2. Откройте HTML-страницу: {html_path}",
+                                        f"3. Или используйте прямую ссылку: /content/yadisk_cache/{filename}",
+                                        "4. Файл будет скачан автоматически при открытии HTML-страницы"
+                                    ]
+                                }
+                            }
+                        else:
+                            if show_progress:
+                                sys.stdout.write("Ошибка сохранения в кэш, пробуем получить ссылку...\n")
+                    else:
+                        if show_progress:
+                            sys.stdout.write("Прямое скачивание не удалось, пробуем получить ссылку...\n")
+                    
+                    href = _get_colab_compatible_url(token, disk_path, show_progress)
+                    if href:
+                        if show_progress:
+                            sys.stdout.write("Получена Colab-совместимая ссылка\n")
+                
+                # Если Colab-специфичная ссылка не получена, пробуем стандартный способ
+                if not href:
+                    if show_progress:
+                        sys.stdout.write("Пробуем стандартный способ получения ссылки...\n")
+                    
+                    # Пытаемся получить прямую ссылку для скачивания
+                    download_attempts = 0
+                    max_attempts = 3
+                    
+                    while download_attempts < max_attempts and not href:
+                        download_attempts += 1
+                        if show_progress:
+                            sys.stdout.write(f"Попытка {download_attempts}/{max_attempts} получить ссылку для скачивания...\n")
+                        
+                        r = _make_request_with_retry("GET", f"{BASE}/resources/download", 
+                                                   headers=headers, params={"path": disk_path}, timeout=30)
+                        
+                        if r.status_code == 200:
+                            href = r.json().get("href")
+                            if href:
+                                # Для Google Colab добавляем специальные параметры
+                                if environment == "colab":
+                                    if "?" in href:
+                                        href += "&disposition=attachment"
+                                    else:
+                                        href += "?disposition=attachment"
+                                
+                                # Проверяем работоспособность ссылки (только если не Colab)
+                                if environment != "colab":
+                                    try:
+                                        check_response = requests.head(href, timeout=10, allow_redirects=True)
+                                        if check_response.status_code >= 400:
+                                            if show_progress:
+                                                sys.stdout.write(f"Ссылка недоступна (код {check_response.status_code}), пробуем снова...\n")
+                                            href = None  # Сбрасываем, чтобы попробовать снова
+                                        else:
+                                            if show_progress:
+                                                sys.stdout.write("Ссылка для скачивания получена и проверена\n")
+                                    except Exception as e:
+                                        if show_progress:
+                                            sys.stdout.write(f"Ошибка проверки ссылки: {e}, пробуем снова...\n")
+                                        href = None
+                                else:
+                                    if show_progress:
+                                        sys.stdout.write("Ссылка для скачивания получена (Colab режим)\n")
+                        else:
+                            if show_progress:
+                                sys.stdout.write(f"Ошибка получения ссылки: {_json_error(r)}\n")
+                
+                if not href:
+                    # Если не удалось получить прямую ссылку, попробуем получить публичную ссылку
+                    if show_progress:
+                        sys.stdout.write("Прямая ссылка недоступна, пытаемся получить публичную ссылку...\n")
+                    
+                    public_url = _get_public_url(token, disk_path, show_progress)
+                    if public_url:
+                        href = public_url
+                        if show_progress:
+                            sys.stdout.write("Получена публичная ссылка как альтернатива\n")
+                    else:
+                        return {"ok": False, "message": f"Не удалось получить рабочую ссылку для скачивания. Попробуйте использовать публичную ссылку или проверьте права доступа к файлу."}
+                
+                # Для Google Colab, если не удалось скачать в кэш, создаем альтернативную ссылку
+                if environment == "colab" and href:
+                    if show_progress:
+                        sys.stdout.write("Создаем альтернативную ссылку для скачивания...\n")
+                    
+                    # Создаем HTML-страницу для скачивания
+                    filename = os.path.basename(disk_path.replace("disk:/", ""))
+                    if not filename:
+                        filename = "downloaded_file"
+                    
+                    # Создаем простую HTML-страницу с автоматическим скачиванием
+                    html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Скачивание файла</title>
+    <script>
+        // Автоматическое скачивание при загрузке страницы
+        window.onload = function() {{
+            var link = document.createElement('a');
+            link.href = '{href}';
+            link.download = '{filename}';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            
+            // Показываем сообщение
+            document.getElementById('message').innerHTML = 'Файл скачивается...';
+        }};
+    </script>
+</head>
+<body>
+    <h2>Скачивание файла: {filename}</h2>
+    <p id="message">Подготовка к скачиванию...</p>
+    <p>Если скачивание не началось автоматически, <a href="{href}" download="{filename}">нажмите здесь</a></p>
+</body>
+</html>"""
+                    
+                    # Сохраняем HTML-файл
+                    html_filename = f"download_{filename}.html"
+                    with open(html_filename, "w", encoding="utf-8") as f:
+                        f.write(html_content)
+                    
+                    if show_progress:
+                        sys.stdout.write(f"Создана HTML-страница для скачивания: {html_filename}\n")
+                    
+                    # Возвращаем информацию о созданной странице
+                    return {
+                        "ok": True, 
+                        "message": "Создана страница для автоматического скачивания", 
+                        "data": {
+                            "download_url": href,  # Оригинальная ссылка
+                            "html_file": html_filename,  # HTML-страница для скачивания
+                            "filename": filename,
+                            "file_size": file_size,
+                            "environment": environment,
+                            "download_method": "html_redirect",
+                            "disk_path": disk_path,
+                            "instructions": [
+                                f"1. Откройте файл {html_filename} в браузере",
+                                "2. Файл скачается автоматически",
+                                f"3. Или используйте прямую ссылку: {href}"
+                            ]
+                        }
+                    }
+                
             # публичный файл (без OAuth)
             elif public_key:
                 params = {"public_key": public_key}
                 if public_path:
                     params["path"] = public_path
-                r = requests.get(f"{BASE}/public/resources/download", params=params, timeout=30)
+                r = _make_request_with_retry("GET", f"{BASE}/public/resources/download", 
+                                           params=params, timeout=30)
+                if r.status_code != 200:
+                    return {"ok": False, "message": _json_error(r)}
+                href = r.json().get("href")
+                if not href:
+                    return {"ok": False, "message": "Сервис не вернул href для скачивания"}
+                file_size = None
             else:
                 return {"ok": False, "message": "Для download укажи либо oauth_token+disk_path, либо public_key"}
 
-            if r.status_code != 200:
-                return {"ok": False, "message": _json_error(r)}
-            href = r.json().get("href")
-            if not href:
-                return {"ok": False, "message": "Сервис не вернул href для скачивания"}
-
-            # Получаем информацию о файле для определения размера
-            file_size = None
-            if token and disk_path:
-                file_info = requests.get(f"{BASE}/resources", headers=headers, params={"path": disk_path}, timeout=30)
-                if file_info.status_code == 200:
-                    file_data = file_info.json()
-                    file_size = file_data.get("size")
-
-            data = {"download_url": href, "file_size": file_size}
+            data = {
+                "download_url": href, 
+                "file_size": file_size,
+                "expires_in": "Ссылка действительна ограниченное время (обычно несколько часов)",
+                "note": "Если ссылка не работает, попробуйте получить новую через повторный вызов функции",
+                "download_method": "direct" if token and disk_path else "public",
+                "environment": environment
+            }
+            
+            # Дополнительные инструкции для Google Colab
+            if environment == "colab":
+                data["colab_instructions"] = [
+                    "1. Файл автоматически скачивается в кэш /content/yadisk_cache/",
+                    "2. Откройте HTML-файл в браузере для автоматического скачивания",
+                    "3. Или используйте прямую ссылку на файл в кэше",
+                    "4. Альтернатива: используйте публичную ссылку через public_key"
+                ]
+                data["colab_example"] = {
+                    "cache_download": {
+                        "action": "download",
+                        "oauth_token": "YOUR_TOKEN",
+                        "disk_path": "disk:/file3.mp3",
+                        "show_progress": True
+                    },
+                    "public_download": {
+                        "action": "download",
+                        "public_key": "https://disk.yandex.ru/d/NS-00uW07T-EsQ",
+                        "public_path": "filename.mp3"
+                    }
+                }
             if token and disk_path:
                 data.update({"disk_path": disk_path})
             else:
