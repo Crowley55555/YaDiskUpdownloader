@@ -3,7 +3,7 @@ from yadisk_file_gateway import yadisk_file_gateway
 # Загрузка файла по URL на Яндекс.Диск
 args = {
     "action": "upload",
-    "oauth_token": "",
+    "oauth_token": "y0__xDIuu2XBxiR7TogncG82BTbb9rgDpTKFA68a9jdILc5cHhkcg",
     "disk_path": "disk:/3333.mp3",
     # "local_path": "D:/143214321.mp3",  # локальный путь
     "file_url": "https://disk.yandex.ru/d/meIOCovSsHIPXg",  # ссылка на файл в интернете
