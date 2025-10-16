@@ -3,7 +3,7 @@ from yadisk_file_gateway import yadisk_file_gateway
 # Загрузка файла по URL на Яндекс.Диск
 args = {
     "action": "upload",
-    "oauth_token": "y0__xDIuu2XBxiR7TogncG82BTbb9rgDpTKFA68a9jdILc5cHhkcg",
+    "oauth_token": "",
     "disk_path": "disk:/MirON42_feat._WANTARAM__CWAMI_-_Devochka_solntse.mp3",
     # "local_path": "D:/143214321.mp3",  # локальный путь
     "file_url": "https://mp3bob.ru/download/muz18/MirON42_feat._WANTARAM__CWAMI_-_Devochka_solntse.mp3",  # ссылка на файл в интернете
