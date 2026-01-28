@@ -6,6 +6,10 @@ def yadisk_file_gateway(arguments):
       rename   — переименование (через move)
       delete   — удаление
       list     — список элементов в папке
+    
+    Параметры:
+      - limit: минимальное значение 10 (значения <= 0 автоматически заменяются на 10)
+               Для Яндекс.Диска limit=0 означает "верни 0 элементов" и ломает логику
     """
     import os
     import json
@@ -88,9 +92,10 @@ def yadisk_file_gateway(arguments):
                 return f"Имя файла содержит недопустимые символы: {invalid_chars}"
         
         # Валидация числовых параметров
+        # Примечание: limit <= 0 будет автоматически заменен на минимальное значение (10) в основном коде
+        # Минимальный лимит для Яндекс.Диска: 10 (API не принимает 0, что означает "верни 0 элементов")
         limit = arguments.get("limit", 100)
-        if isinstance(limit, (int, str)) and int(limit) < 1:
-            return "limit должен быть больше 0"
+        # Валидация limit перенесена в основной код для автоматической подмены проблемных значений
         
         offset = arguments.get("offset", 0)
         if isinstance(offset, (int, str)) and int(offset) < 0:
@@ -794,6 +799,18 @@ def yadisk_file_gateway(arguments):
     validation_error = _validate_inputs(arguments)
     if validation_error:
         return {"ok": False, "message": validation_error}
+    
+    # Автоматическая подмена limit <= 0 на минимальное значение (защита от ошибок моделей)
+    # Минимальный лимит для Яндекс.Диска: 10 (0 означает "верни 0 элементов" и ломает логику)
+    MIN_LIMIT = 10
+    if limit <= 0:
+        if show_progress:
+            sys.stdout.write(f"⚠️  Предупреждение: limit={limit} заменен на {MIN_LIMIT} (минимальное значение для Яндекс.Диска)\n")
+        limit = MIN_LIMIT
+    elif limit < MIN_LIMIT:
+        if show_progress:
+            sys.stdout.write(f"⚠️  Предупреждение: limit={limit} заменен на {MIN_LIMIT} (минимальное значение для Яндекс.Диска)\n")
+        limit = MIN_LIMIT
     
     # Определяем среду выполнения один раз для всех операций
     environment = _detect_environment()
